@@ -16,7 +16,7 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 SCRAPINGBEE_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # Sabhi shopping sites ki URLs list
 SITES = [
