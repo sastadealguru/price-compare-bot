@@ -16,7 +16,6 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 SCRAPINGBEE_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 
 genai.configure(api_key=GEMINI_KEY)
-# Fast aur high-quota free tier model
 model = genai.GenerativeModel('gemini-1.5-flash')
 
 SITES = [
@@ -26,7 +25,6 @@ SITES = [
     {"name": "Reliance Digital", "search_url": "https://www.reliancedigital.in/search?q={query}"},
 ]
 
-# Scrape karne ke function ko async banaya taaki parallel chal sake
 async def fetch_page_async(url):
     params = {
         'api_key': SCRAPINGBEE_KEY,
@@ -35,7 +33,6 @@ async def fetch_page_async(url):
     }
     loop = asyncio.get_event_loop()
     try:
-        # Non-blocking network call
         resp = await loop.run_in_executor(None, lambda: requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=20))
         if resp.status_code == 200:
             return resp.text
@@ -49,8 +46,8 @@ async def fetch_page_async(url):
 async def extract_product_info_async(html, site_name):
     if not html:
         return []
-    html_snippet = html[:7000]
-    prompt = f"""Extract top 2 products from this {site_name} search HTML.
+    html_snippet = html[:8000]
+    prompt = f"""Extract top 3 products from this {site_name} search HTML.
 Provide: product title, selling price, MRP, and bank offer.
 Return ONLY JSON array: [{{"title": "...", "price": "₹...", "mrp": "₹...", "bank_offer": "..."}}]
 If none, return [].
@@ -68,10 +65,20 @@ HTML: {html_snippet}"""
         logger.error(f"Gemini extraction failed: {e}")
         return []
 
-def find_cheapest(products, site_name):
+def find_cheapest(products, site_name, user_query):
     best = None
     best_price = float('inf')
+    
+    # Query ke keywords nikalne ke liye (jaise 'iphone', '15')
+    query_words = [w.lower() for w in re.findall(r'\w+', user_query) if len(w) > 1]
+
     for p in products:
+        title = p.get('title', '').lower()
+        
+        # STRICT FILTER: Agar query ka koi bhi important word title mein nahi hai, toh skip karo
+        if query_words and not any(word in title for word in query_words):
+            continue
+            
         price_str = p.get('price', '').replace('₹', '').replace(',', '').strip()
         try:
             price = float(price_str)
@@ -88,21 +95,20 @@ def find_cheapest(products, site_name):
             best = {**p, "effective_price": effective, "site": site_name, "original_price": price, "discount": discount}
     return best
 
-# Ek sath ek site process karne ka task
 async def process_single_site(site, user_query):
     search_url = site["search_url"].format(query=requests.utils.quote(user_query))
     html = await fetch_page_async(search_url)
     products = await extract_product_info_async(html, site["name"])
     if not products:
         return {"site": site["name"], "status": "No data"}
-    best = find_cheapest(products, site["name"])
+    # Yahan user_query pass ki filter karne ke liye
+    best = find_cheapest(products, site["name"], user_query)
     return best if best else {"site": site["name"], "status": "Not found"}
 
 async def search_product(update, context):
     user_query = update.message.text
     await update.message.reply_text("⚡ Searching all sites simultaneously... Fetching best deals!")
 
-    # Sabhi sites ko AK SATH parallel mein run kar rahe hain (Fast)
     tasks = [process_single_site(site, user_query) for site in SITES]
     final_results = await asyncio.gather(*tasks)
 
@@ -110,7 +116,7 @@ async def search_product(update, context):
     valid.sort(key=lambda x: x['effective_price'])
 
     if not valid:
-        await update.message.reply_text("❌ No products found or API limits reached. Please try again in a moment.")
+        await update.message.reply_text("❌ Product not found or perfect match unavailable on the stores right now.")
         return
 
     msg = "🏆 **Cheapest Deal Found!**\n\n"
