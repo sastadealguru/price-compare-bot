@@ -126,8 +126,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_product))
-    port = int(os.environ.get("PORT", 10000))
-    app.run_webhook(listen="0.0.0.0", port=port, webhook_url="https://price-compare-bot.onrender.com/webhook")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
