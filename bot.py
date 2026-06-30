@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Render par aapne jo bhi naam set kiya ho, dono cases ko handle karne ke liye fallback laga diya hai
+# Environment variables fetch karne ke liye fallback
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 SCRAPINGBEE_KEY = os.getenv("SCRAPINGBEE_API_KEY")
@@ -18,7 +18,7 @@ SCRAPINGBEE_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('gemini-2.0-flash')
 
-# URLs ke aage aur peeche missing quotes ko sahi kar diya hai
+# Sabhi shopping sites ki URLs list
 SITES = [
     {"name": "Amazon", "search_url": "https://www.amazon.in/s?k={query}"},
     {"name": "Flipkart", "search_url": "https://www.flipkart.com/search?q={query}"},
@@ -27,12 +27,11 @@ SITES = [
 ]
 
 def fetch_page(url):
+    # Free trial/account ke liye params ko simple rakha hai taaki Error 400 na aaye
     params = {
         'api_key': SCRAPINGBEE_KEY,
         'url': url,
         'render_js': 'false',
-        'premium_proxy': 'true',
-        'country_code': 'in',
     }
     try:
         resp = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=30)
