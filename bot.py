@@ -16,7 +16,8 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 SCRAPINGBEE_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Correct model string format for beta/v1 compatibility
+model = genai.GenerativeModel('models/gemini-1.5-flash')
 
 SITES = [
     {"name": "Amazon", "search_url": "https://www.amazon.in/s?k={query}"},
@@ -46,11 +47,11 @@ async def fetch_page_async(url):
 async def extract_product_info_async(html, site_name):
     if not html:
         return []
-    html_snippet = html[:8000]
-    prompt = f"""Extract top 3 products from this {site_name} search HTML.
+    html_snippet = html[:6000] # Kept small for free tier safety
+    prompt = f"""Extract top 2 matches from this {site_name} HTML.
 Provide: product title, selling price, MRP, and bank offer.
 Return ONLY JSON array: [{{"title": "...", "price": "₹...", "mrp": "₹...", "bank_offer": "..."}}]
-If none, return [].
+If none found, return [].
 HTML: {html_snippet}"""
     loop = asyncio.get_event_loop()
     try:
@@ -68,27 +69,28 @@ HTML: {html_snippet}"""
 def find_cheapest(products, site_name, user_query):
     best = None
     best_price = float('inf')
-    
-    # Query ke keywords nikalne ke liye (jaise 'iphone', '15')
     query_words = [w.lower() for w in re.findall(r'\w+', user_query) if len(w) > 1]
 
     for p in products:
-        title = p.get('title', '').lower()
+        title = p.get('title') or ''
+        title = title.lower()
         
-        # STRICT FILTER: Agar query ka koi bhi important word title mein nahi hai, toh skip karo
+        # Filter match checks
         if query_words and not any(word in title for word in query_words):
             continue
             
-        price_str = p.get('price', '').replace('₹', '').replace(',', '').strip()
+        price_str = (p.get('price') or '').replace('₹', '').replace(',', '').strip()
         try:
             price = float(price_str)
         except:
             continue
+            
         discount = 0
-        offer_text = p.get('bank_offer', '')
+        offer_text = p.get('bank_offer') or '' # Fix: Handled NoneType gracefully
         discount_matches = re.findall(r'₹(\d+)', offer_text)
         if discount_matches:
             discount = max([int(x) for x in discount_matches])
+            
         effective = price - discount
         if effective < best_price:
             best_price = effective
@@ -100,14 +102,12 @@ async def process_single_site(site, user_query):
     html = await fetch_page_async(search_url)
     products = await extract_product_info_async(html, site["name"])
     if not products:
-        return {"site": site["name"], "status": "No data"}
-    # Yahan user_query pass ki filter karne ke liye
-    best = find_cheapest(products, site["name"], user_query)
-    return best if best else {"site": site["name"], "status": "Not found"}
+        return None
+    return find_cheapest(products, site["name"], user_query)
 
 async def search_product(update, context):
     user_query = update.message.text
-    await update.message.reply_text("⚡ Searching all sites simultaneously... Fetching best deals!")
+    await update.message.reply_text("⚡ Searching all sites parallelly with fixed model... Fetching real deals!")
 
     tasks = [process_single_site(site, user_query) for site in SITES]
     final_results = await asyncio.gather(*tasks)
@@ -116,7 +116,7 @@ async def search_product(update, context):
     valid.sort(key=lambda x: x['effective_price'])
 
     if not valid:
-        await update.message.reply_text("❌ Product not found or perfect match unavailable on the stores right now.")
+        await update.message.reply_text("❌ No exact match products found right now. Please try again or refine search.")
         return
 
     msg = "🏆 **Cheapest Deal Found!**\n\n"
