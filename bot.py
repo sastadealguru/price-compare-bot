@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Sirf Telegram Token chahiye ab
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 
 SITES = [
@@ -20,19 +21,19 @@ async def search_product(update, context):
     user_query = update.message.text
     encoded_query = requests.utils.quote(user_query)
     
-    msg = f"🔍 **Live Deal Links for: {user_query}**\n\n"
-    msg += "Click below to open direct search results with live bank offers:\n\n"
+    msg = f"🔍 **Live Deals for: {user_query}**\n\n"
+    msg += "Niche diye gaye links par click karke direct live prices aur bank offers check karein:\n\n"
     
     for site in SITES:
         link = site["search_url"].format(query=encoded_query)
-        msg += f"{site['emoji']} **{site['name']}**:\n👉 [Check Cheapest Price on {site['name']}]({link})\n\n"
+        msg += f"{site['emoji']} **{site['name']}**:\n👉 [Open {site['name']} Results]({link})\n\n"
         
-    msg += "💡 _Tip: Check bank discounts directly on the store pages for the final sasta price!_"
+    msg += "💡 _Tip: Stores par click karte hi unke official app/website mein sabse sasti aur updated price dikhegi!_"
     
     await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def start(update, context):
-    await update.message.reply_text("🛍️ Welcome to Sasta Deal Guru!\nSend me any product name and I'll fetch instant live search links for you.")
+    await update.message.reply_text("🛍️ Welcome to Sasta Deal Guru!\nSend me any product name and I'll fetch instant comparison links for you.")
 
 def main():
     if not TELEGRAM_TOKEN:
