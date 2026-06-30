@@ -3,6 +3,7 @@ import logging
 import requests
 import json
 import re
+import asyncio
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -10,15 +11,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Environment variables fetch karne ke liye fallback
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 SCRAPINGBEE_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+# Fast aur high-quota free tier model
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Sabhi shopping sites ki URLs list
 SITES = [
     {"name": "Amazon", "search_url": "https://www.amazon.in/s?k={query}"},
     {"name": "Flipkart", "search_url": "https://www.flipkart.com/search?q={query}"},
@@ -26,15 +26,17 @@ SITES = [
     {"name": "Reliance Digital", "search_url": "https://www.reliancedigital.in/search?q={query}"},
 ]
 
-def fetch_page(url):
-    # Free trial/account ke liye params ko simple rakha hai taaki Error 400 na aaye
+# Scrape karne ke function ko async banaya taaki parallel chal sake
+async def fetch_page_async(url):
     params = {
         'api_key': SCRAPINGBEE_KEY,
         'url': url,
         'render_js': 'false',
     }
+    loop = asyncio.get_event_loop()
     try:
-        resp = requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=30)
+        # Non-blocking network call
+        resp = await loop.run_in_executor(None, lambda: requests.get('https://app.scrapingbee.com/api/v1/', params=params, timeout=20))
         if resp.status_code == 200:
             return resp.text
         else:
@@ -44,18 +46,18 @@ def fetch_page(url):
         logger.error(f"ScrapingBee exception: {e}")
         return None
 
-def extract_product_info(html, site_name):
+async def extract_product_info_async(html, site_name):
     if not html:
         return []
-    html_snippet = html[:15000]
-    prompt = f"""Extract the top 3-5 product listings from this {site_name} search results HTML.
-For each product provide: product title, selling price (after discount), MRP if visible, and any bank offer text.
-Return ONLY a JSON array like: [{{"title": "...", "price": "₹...", "mrp": "₹...", "bank_offer": "..."}}]
-If no results found, return [].
-
+    html_snippet = html[:7000]
+    prompt = f"""Extract top 2 products from this {site_name} search HTML.
+Provide: product title, selling price, MRP, and bank offer.
+Return ONLY JSON array: [{{"title": "...", "price": "₹...", "mrp": "₹...", "bank_offer": "..."}}]
+If none, return [].
 HTML: {html_snippet}"""
+    loop = asyncio.get_event_loop()
     try:
-        response = model.generate_content(prompt)
+        response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
         text = response.text
         start = text.find('[')
         end = text.rfind(']') + 1
@@ -86,29 +88,29 @@ def find_cheapest(products, site_name):
             best = {**p, "effective_price": effective, "site": site_name, "original_price": price, "discount": discount}
     return best
 
+# Ek sath ek site process karne ka task
+async def process_single_site(site, user_query):
+    search_url = site["search_url"].format(query=requests.utils.quote(user_query))
+    html = await fetch_page_async(search_url)
+    products = await extract_product_info_async(html, site["name"])
+    if not products:
+        return {"site": site["name"], "status": "No data"}
+    best = find_cheapest(products, site["name"])
+    return best if best else {"site": site["name"], "status": "Not found"}
+
 async def search_product(update, context):
     user_query = update.message.text
-    await update.message.reply_text("🔍 Searching Amazon, Flipkart, Croma, Reliance Digital... Please wait 15-20 sec.")
+    await update.message.reply_text("⚡ Searching all sites simultaneously... Fetching best deals!")
 
-    final_results = []
-    for site in SITES:
-        search_url = site["search_url"].format(query=requests.utils.quote(user_query))
-        html = fetch_page(search_url)
-        products = extract_product_info(html, site["name"])
-        if not products:
-            final_results.append({"site": site["name"], "status": "No data"})
-            continue
-        best = find_cheapest(products, site["name"])
-        if best:
-            final_results.append(best)
-        else:
-            final_results.append({"site": site["name"], "status": "Not found"})
+    # Sabhi sites ko AK SATH parallel mein run kar rahe hain (Fast)
+    tasks = [process_single_site(site, user_query) for site in SITES]
+    final_results = await asyncio.gather(*tasks)
 
-    valid = [r for r in final_results if 'effective_price' in r]
+    valid = [r for r in final_results if r and 'effective_price' in r]
     valid.sort(key=lambda x: x['effective_price'])
 
     if not valid:
-        await update.message.reply_text("❌ Product not found on any site.")
+        await update.message.reply_text("❌ No products found or API limits reached. Please try again in a moment.")
         return
 
     msg = "🏆 **Cheapest Deal Found!**\n\n"
@@ -122,12 +124,11 @@ async def search_product(update, context):
     await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def start(update, context):
-    await update.message.reply_text("🛍️ Welcome to Sasta Deal Guru!\nSend me a product name and I'll find the cheapest price with bank offers.")
+    await update.message.reply_text("🛍️ Welcome to Sasta Deal Guru!\nSend me a product name and I'll find the cheapest price instantly.")
 
 def main():
     if not TELEGRAM_TOKEN:
-        raise ValueError("Error: TELEGRAM_TOKEN ya TELEGRAM_BOT_TOKEN environment variable nahi mila!")
-        
+        raise ValueError("Error: TELEGRAM_TOKEN nahi mila!")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_product))
