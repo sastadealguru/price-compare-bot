@@ -17,14 +17,11 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-# Check if Gemini Key is available
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
     model = genai.GenerativeModel('gemini-2.0-flash')
-    logger.info("Gemini Model successfully configured.")
 else:
     model = None
-    logger.error("GEMINI_API_KEY is completely missing from environment!")
 
 ALERT_FILE = "alerts.json"
 
@@ -56,11 +53,10 @@ ALL_SITES = [
 
 async def get_prices_and_offers_from_gemini(query):
     if not model:
-        return "KEY_MISSING"
+        return None
     prompt = f"""
     Act as an Indian shopping expert. For the item '{query}', provide the typical current online selling price (in INR) and any ongoing bank/discount offers across these apps: Amazon, Flipkart, JioMart, Blinkit, Zepto, Croma, Reliance Digital, Swiggy Instamart, Snapdeal, eBay.
     Only return a clean JSON array of objects with keys 'site', 'price' (numerical value only), 'title', and 'offer'.
-    Example: [{{"site": "Amazon", "price": 45000, "title": "Product Name", "offer": "10% off on SBI Cards"}}]
     """
     try:
         response = model.generate_content(prompt)
@@ -70,9 +66,8 @@ async def get_prices_and_offers_from_gemini(query):
         if start != -1 and end > start:
             return json.loads(text[start:end])
     except Exception as e:
-        logger.error(f"Gemini payload failed: {e}")
-        return "API_ERROR"
-    return []
+        logger.error(f"Gemini limit reached or failed: {e}")
+    return None # Return None if limit exceeded
 
 async def handle_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text.strip()
@@ -94,61 +89,53 @@ async def handle_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Pehle kisi product ka naam likhein.")
             return
 
-    await update.message.reply_text(f"🔍 Searching grocery & electronics platforms for '{user_msg}'...")
+    await update.message.reply_text(f"🔍 Fetching links & checking deals for '{user_msg}'...")
     encoded_query = urllib.parse.quote_plus(user_msg)
     
     raw_deals = await get_prices_and_offers_from_gemini(user_msg)
     
-    # Error checking for UI feedback
-    if raw_deals == "KEY_MISSING":
-        await update.message.reply_text("⚠️ **Error**: Render Dashboard mein `GEMINI_API_KEY` nahi mili hai. Kripya environment variable check karein.")
-        return
-    elif raw_deals == "API_ERROR":
-        await update.message.reply_text("⚠️ **Error**: Gemini API standard free tier limit exceed ho chuki hai ya connection error hai. Kripya thodi der baad try karein.")
-        return
-
-    if isinstance(raw_deals, list) and raw_deals:
+    # Simple formatting tracker
+    msg = f"🏆 **Comparison Links for: {user_msg}**\n\n"
+    
+    if raw_deals and isinstance(raw_deals, list):
         raw_deals.sort(key=lambda x: x.get('price', 999999))
+        returned_sites = {d['site'].lower(): d for d in raw_deals if 'site' in d}
+        
+        idx = 1
+        for site in ALL_SITES:
+            site_key = site["name"].lower()
+            match_key = "flipkart" if "flipkart" in site_key else "amazon" if "amazon" in site_key else site_key
+            deal = returned_sites.get(match_key) or returned_sites.get(site_key)
+            link = site["url"].format(q=encoded_query)
+            
+            if deal:
+                medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else "🔹"
+                msg += f"{medal} **{site['name']}**: ₹{deal['price']:,}\n"
+                msg += f" 🎁 *Offer*: {deal.get('offer', 'Check app')}\n"
+                msg += f" 👉 [Open Results]({link})\n\n"
+                idx += 1
+            else:
+                msg += f"🔹 **{site['name']}**:\n 👉 [Check Live Price]({link})\n\n"
     else:
-        raw_deals = []
-        
-    returned_sites = {d['site'].lower(): d for d in raw_deals if isinstance(d, dict) and 'site' in d}
-    
-    msg = f"🏆 **Price & Offer Comparison for: {user_msg}**\n*(🔥 Sasta Sabse Upar)*\n\n"
-    
-    idx = 1
-    for site in ALL_SITES:
-        site_key = site["name"].lower()
-        match_key = "flipkart" if "flipkart" in site_key else "amazon" if "amazon" in site_key else site_key
-        
-        deal = returned_sites.get(match_key) or returned_sites.get(site_key)
-                
-        link = site["url"].format(q=encoded_query)
-        if deal:
-            medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else "🔹"
-            msg += f"{medal} **{site['name']}**: ₹{deal['price']:,}\n"
-            msg += f" 📋 _{deal['title']}_\n"
-            msg += f" 🎁 **Offer**: {deal.get('offer', 'No offer')}\n"
-            msg += f" 👉 [Open Search Results]({link})\n\n"
-            idx += 1
-        else:
-            msg += f"🔹 **{site['name']}**:\n"
-            msg += f" 👉 [Check Live Price]({link})\n\n"
+        # FAIL-SAFE: Gemini limit exceeded par bhi links aur interface hamesha chalega!
+        msg += "⚠️ _Note: Gemini API free limit temporary full hai, isliye direct live stores se price check karein:_\n\n"
+        for site in ALL_SITES:
+            link = site["url"].format(q=encoded_query)
+            msg += f"{site['emoji']} **{site['name']}**:\n 👉 [Click to open store search]({link})\n\n"
             
     msg += "───────────────────\n"
     msg += f"🤔 **Aapko yeh '{user_msg}' kitne rupaye mein chahiye?**\n"
-    msg += "Neeche reply mein bas woh price likh dijiye! (e.g. 35)"
+    msg += "Neeche reply mein bas target price (number) likh dijiye, main auto-alert background mein track karunga! (e.g. 400)"
     
     context.user_data['pending_item'] = user_msg
     await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def check_prices_background(app):
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(7200) # Check interval to 2 hours to avoid free tier lockouts
         alerts = load_alerts()
         if not alerts or not model:
             continue
-            
         for chat_id, user_alerts in list(alerts.items()):
             for item, target_price in list(user_alerts.items()):
                 prompt = f"What is the typical lowest current price in INR for '{item}' online? Return ONLY the number."
@@ -156,12 +143,12 @@ async def check_prices_background(app):
                     response = model.generate_content(prompt)
                     current_price = float(re.sub(r'[^\d.]', '', response.text.strip()))
                     if current_price <= target_price:
-                        msg = f"🚨 **PRICE DROP ALERT!**\n\n💰 **{item}** aapke budget mein aa gaya hai!\n📈 Target: ₹{target_price}\n🔥 Live Price: ₹{current_price}"
+                        msg = f"🚨 **PRICE DROP ALERT!**\n\n💰 **{item}** budget mein hai!\n📈 Target: ₹{target_price}\n🔥 Live Price: ₹{current_price}"
                         await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
                         del alerts[chat_id][item]
                         save_alerts(alerts)
-                except Exception as e:
-                    logger.error(f"Background check failed: {e}")
+                except:
+                    pass
 
 def run_dummy_server():
     port = int(os.getenv("PORT", 8080))
@@ -172,7 +159,6 @@ def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_msg))
-    
     loop = asyncio.get_event_loop()
     loop.create_task(check_prices_background(app))
     app.run_polling()
