@@ -17,11 +17,14 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
+# Check if Gemini Key is available
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
     model = genai.GenerativeModel('gemini-2.0-flash')
+    logger.info("Gemini Model successfully configured.")
 else:
     model = None
+    logger.error("GEMINI_API_KEY is completely missing from environment!")
 
 ALERT_FILE = "alerts.json"
 
@@ -53,7 +56,7 @@ ALL_SITES = [
 
 async def get_prices_and_offers_from_gemini(query):
     if not model:
-        return []
+        return "KEY_MISSING"
     prompt = f"""
     Act as an Indian shopping expert. For the item '{query}', provide the typical current online selling price (in INR) and any ongoing bank/discount offers across these apps: Amazon, Flipkart, JioMart, Blinkit, Zepto, Croma, Reliance Digital, Swiggy Instamart, Snapdeal, eBay.
     Only return a clean JSON array of objects with keys 'site', 'price' (numerical value only), 'title', and 'offer'.
@@ -68,16 +71,15 @@ async def get_prices_and_offers_from_gemini(query):
             return json.loads(text[start:end])
     except Exception as e:
         logger.error(f"Gemini payload failed: {e}")
+        return "API_ERROR"
     return []
 
 async def handle_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text.strip()
     chat_id = str(update.effective_chat.id)
     
-    # Check if the message is JUST a number (e.g., "20" or "450")
     if re.match(r'^\d+$', user_msg):
         pending_item = context.user_data.get('pending_item')
-        
         if pending_item:
             target_price = float(user_msg)
             alerts = load_alerts()
@@ -85,25 +87,32 @@ async def handle_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 alerts[chat_id] = {}
             alerts[chat_id][pending_item] = target_price
             save_alerts(alerts)
-            
-            # Clear the context state
             context.user_data['pending_item'] = None
-            
-            await update.message.reply_text(f"✅ **Alert Set Ho Gaya!**\n\n🛒 Item: {pending_item}\n📉 Target Price: ₹{target_price}\n\nJaise hi price isse kam hoga, main aapko automatic bta dunga!")
+            await update.message.reply_text(f"✅ **Alert Set Ho Gaya!**\n\n🛒 Item: {pending_item}\n📉 Target Price: ₹{target_price}\n\nJaise hi price isse kam hoga, main notification bhej dunga!")
             return
         else:
-            await update.message.reply_text("❌ Pehle kisi product ka naam likhein (jaise: Milk), uske baad price set karein.")
+            await update.message.reply_text("❌ Pehle kisi product ka naam likhein.")
             return
 
-    # Normal Product Search
     await update.message.reply_text(f"🔍 Searching grocery & electronics platforms for '{user_msg}'...")
     encoded_query = urllib.parse.quote_plus(user_msg)
+    
     raw_deals = await get_prices_and_offers_from_gemini(user_msg)
     
-    if raw_deals:
+    # Error checking for UI feedback
+    if raw_deals == "KEY_MISSING":
+        await update.message.reply_text("⚠️ **Error**: Render Dashboard mein `GEMINI_API_KEY` nahi mili hai. Kripya environment variable check karein.")
+        return
+    elif raw_deals == "API_ERROR":
+        await update.message.reply_text("⚠️ **Error**: Gemini API standard free tier limit exceed ho chuki hai ya connection error hai. Kripya thodi der baad try karein.")
+        return
+
+    if isinstance(raw_deals, list) and raw_deals:
         raw_deals.sort(key=lambda x: x.get('price', 999999))
+    else:
+        raw_deals = []
         
-    returned_sites = {d['site'].lower(): d for d in raw_deals if 'site' in d}
+    returned_sites = {d['site'].lower(): d for d in raw_deals if isinstance(d, dict) and 'site' in d}
     
     msg = f"🏆 **Price & Offer Comparison for: {user_msg}**\n*(🔥 Sasta Sabse Upar)*\n\n"
     
@@ -112,11 +121,7 @@ async def handle_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         site_key = site["name"].lower()
         match_key = "flipkart" if "flipkart" in site_key else "amazon" if "amazon" in site_key else site_key
         
-        deal = None
-        for k, v in returned_sites.items():
-            if match_key in k:
-                deal = v
-                break
+        deal = returned_sites.get(match_key) or returned_sites.get(site_key)
                 
         link = site["url"].format(q=encoded_query)
         if deal:
@@ -132,9 +137,45 @@ async def handle_user_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     msg += "───────────────────\n"
     msg += f"🤔 **Aapko yeh '{user_msg}' kitne rupaye mein chahiye?**\n"
-    msg += "Neeche reply mein bas woh number (price) likh dijiye, koi command nahi lagani! (e.g. 35)"
+    msg += "Neeche reply mein bas woh price likh dijiye! (e.g. 35)"
     
-    # Save the item name in bot memory for this user
     context.user_data['pending_item'] = user_msg
+    await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def check_prices_background(app):
+    while True:
+        await asyncio.sleep(3600)
+        alerts = load_alerts()
+        if not alerts or not model:
+            continue
+            
+        for chat_id, user_alerts in list(alerts.items()):
+            for item, target_price in list(user_alerts.items()):
+                prompt = f"What is the typical lowest current price in INR for '{item}' online? Return ONLY the number."
+                try:
+                    response = model.generate_content(prompt)
+                    current_price = float(re.sub(r'[^\d.]', '', response.text.strip()))
+                    if current_price <= target_price:
+                        msg = f"🚨 **PRICE DROP ALERT!**\n\n💰 **{item}** aapke budget mein aa gaya hai!\n📈 Target: ₹{target_price}\n🔥 Live Price: ₹{current_price}"
+                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                        del alerts[chat_id][item]
+                        save_alerts(alerts)
+                except Exception as e:
+                    logger.error(f"Background check failed: {e}")
+
+def run_dummy_server():
+    port = int(os.getenv("PORT", 8080))
+    with socketserver.TCPServer(("", port), http.server.SimpleHTTPRequestHandler) as httpd:
+        httpd.serve_forever()
+
+def main():
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_msg))
     
-    await update.message.reply_text(msg, parse_mode="
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_prices_background(app))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
